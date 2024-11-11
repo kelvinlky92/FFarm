@@ -13,7 +13,7 @@ logs/
 *.log
 
 # Ignore images if you don't want to track them (optional)
-# images/
+images/
 
 # Temporary files
 *.tmp
