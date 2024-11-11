@@ -1,7 +1,7 @@
 # Farming Bot Application
 
 ## Description
-The Farming Bot Application is a Telegram bot designed to help users manage their virtual farm. Users can plant crops, check their status, harvest them, and manage upgrades for their farming operations. The bot provides an interactive experience through Telegram, making farming fun and engaging. Please try the game at this link t.me/FFarmKY_bot.
+The Farming Bot Application is a Telegram bot designed to help users manage their virtual farm. Users can plant crops, check their status, harvest them, and manage upgrades for their farming operations. The bot provides an interactive experience through Telegram, making farming fun and engaging. Please try the game at this link (https://t.me/FFarmKY_bot)
 
 ## Features
 - **Planting Crops**: Users can choose from various crops to plant in their virtual farm.
