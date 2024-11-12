@@ -14,6 +14,7 @@ import asyncio
 from contextlib import asynccontextmanager
 import sys
 import io
+from collections import defaultdict
 
 load_dotenv()
 
@@ -63,6 +64,29 @@ ngrok_process = None  # Declare the ngrok_process variable
 plant_data = {}
 user_data = {}  # Game state (in-memory for simplicity; consider using a database for persistence)
 users_to_notify = set()
+
+# Create a queue for incoming messages
+message_queue = asyncio.Queue()
+
+# Rate limiting configuration
+RATE_LIMIT = 20  # Maximum number of requests
+TIME_FRAME = 60  # Time frame in seconds
+
+# Dictionary to store user request timestamps
+user_requests = defaultdict(list)
+
+def rate_limiter(chat_id):
+    current_time = time.time()
+    # Remove timestamps that are outside the time frame
+    user_requests[chat_id] = [timestamp for timestamp in user_requests[chat_id] if current_time - timestamp < TIME_FRAME]
+    
+    if len(user_requests[chat_id]) < RATE_LIMIT:
+        # Allow the request
+        user_requests[chat_id].append(current_time)
+        return True
+    else:
+        # Deny the request
+        return False
 
 def start_ngrok():
     logger.info("Starting ngrok...")
@@ -202,6 +226,12 @@ def get_available_plots_slots(upgrade_level):
         5: 10000000
     }
     return slots.get(upgrade_level, 100)  # Default to 0 if level is not found
+
+async def process_queue():
+    while True:
+        chat_id, text = await message_queue.get()  # Wait for an item from the queue
+        await handle_message(chat_id, text)  # Process the message
+        message_queue.task_done()  # Mark the task as done
 
 async def fetch_plant_data():
     """Fetch plant data from the plants_listing table and store it in a global variable."""
@@ -525,6 +555,11 @@ async def send_admin_announcement_photo(chat_id, photo):
             is_admin = 0  # Default to 0 if no result found
 
         if is_admin == 1:
+            # Rate limiting check
+            if not rate_limiter(chat_id):
+                await bot.send_message(chat_id=chat_id, text='You are sending requests too quickly. Please wait a moment.')
+                return
+            
             cursor.execute("SELECT chat_id FROM users") 
             tosend_chat_ids = cursor.fetchall()
             
@@ -540,9 +575,12 @@ async def send_admin_announcement_photo(chat_id, photo):
 
 async def handle_manager_on(chat_id):
     """Handle the manager on selection for the user."""
+    if not rate_limiter(chat_id):  # Use chat_id or user_id for rate limiting
+        await bot.send_message(chat_id=chat_id, text='You are sending requests too quickly. Please wait a moment.')
+        return
+
     conn = create_connection()
     cursor = conn.cursor()
-
     cursor.execute("UPDATE users SET manager_on_off = 1 WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
@@ -1371,47 +1409,10 @@ async def handle_auto_planting_plant_selection(chat_id, callback_data):
 
     conn.close()
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global ngrok_process  # Declare the global variable
-
-    # Startup logic
-    create_tables()  # Create necessary tables
-    ngrok_process = start_ngrok()  # Start ngrok and store the process
-    ngrok_url = get_ngrok_url()  # Get ngrok URL
-    set_telegram_webhook(ngrok_url)  # Set the Telegram webhook
-    
-    # Fetch plant data on startup
-    await fetch_plant_data()  # Load plant data into memory
-
-    logger.info("Startup logic completed.")
-
-    # Start the check_ready_for_harvest task in the background
-    asyncio.create_task(check_ready_for_harvest())  # Run the background task
-
-    yield  # This will pause the lifespan context until the app is shut down
-
-    # Shutdown logic
-    logger.info("Shutting down the application...")
-    if ngrok_process:
-        ngrok_process.terminate()  # Terminate the ngrok process
-
-# Assign the lifespan context to the app
-app = FastAPI(lifespan=lifespan)
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    update = await request.json()
-    logger.info(f"Received update: {update}")
-
-    # Check if the update contains a message
-    if 'message' in update:
-        chat_id = update['message']['chat']['id']
-        text = update['message'].get('text', '')  # Use .get() to avoid KeyError
-
-        logger.info(f"Received message: {text} from chat_id: {chat_id}")
-
-        # Initialize user_data for the chat_id if it doesn't exist
+async def handle_message(chat_id, text, update, callback_data):
+    # Your existing message handling logic goes here
+    # For example, checking commands, processing user input, etc.
+    # Initialize user_data for the chat_id if it doesn't exist
         if chat_id not in user_data:
             user_data[chat_id] = {}
 
@@ -1459,8 +1460,19 @@ async def webhook(request: Request):
 
         # Handle quantity input after plant selection
         elif 'selected_plant' in user_data[chat_id]:
+            # Rate limiting check
+            if not rate_limiter(chat_id):
+                await bot.send_message(chat_id=chat_id, text='You are sending requests too quickly. Please wait a moment.')
+                return JSONResponse(content={"status": "ok"})  # Early return
+
             try:
-                quantity = int(text)  # Convert input to integer
+                # Ensure text is not None and is a valid integer string
+                if text is not None and text.isdigit():
+                        quantity = int(text)  # Convert input to integer
+                else:
+                    await bot.send_message(chat_id=chat_id, text='Please enter a valid number for the quantity.')
+                    return
+
                 selected_plant = user_data[chat_id]['selected_plant']
                 total_cost = quantity * selected_plant['price']
 
@@ -1560,6 +1572,214 @@ async def webhook(request: Request):
                 logger.error(f"ValueError: {ve}")  # Log the specific ValueError
                 await bot.send_message(chat_id=chat_id, text='Please enter a valid number for the quantity.')
 
+        elif callback_data == 'planting':
+            await show_planting_menu(chat_id)
+        elif callback_data in ['Fruits', 'Vegetables', 'Grain']:
+            await show_plants(chat_id, callback_data)
+        elif callback_data.startswith('auto_planting_'):
+            category = callback_data.split('_')[2]  # Extract the category from the callback data
+            await show_auto_planting_plants(chat_id, category)
+        elif callback_data == 'show_game_menu':
+            await show_game_menu(chat_id)  # Show the game menu
+        elif callback_data == 'plant_status':  # Handle the plant status callback
+            await check_planting_status(chat_id)  # Check planting status
+        elif callback_data == 'admin_announcement':
+            await select_admin_announcement_type(chat_id)
+        elif callback_data == 'admin_announcement_text':
+            await admin_announcement_text(chat_id)
+        elif callback_data == 'admin_announcement_photo':
+            await admin_announcement_photo(chat_id)
+        elif callback_data == 'manager':
+            await show_manager_menu(chat_id)
+        elif callback_data == 'harvest':  # Handle the harvest callback
+            await harvest_crops(chat_id)  # Call the harvest function
+        elif callback_data == 'upgrades':
+            await show_upgrades_menu(chat_id)  # Show upgrades menu
+        elif callback_data == 'manager_on_off':
+            await handle_manager_on_off(chat_id)  # Handle manager on/off
+        elif callback_data == 'manager_on':
+            await handle_manager_on(chat_id)  # Handle manager on
+        elif callback_data == 'manager_off':
+            await handle_manager_off(chat_id)  # Handle manager off
+        elif callback_data == 'auto_planting':
+            await handle_auto_planting(chat_id)  # Handle auto planting
+        elif callback_data == 'change_auto_planting':
+            await handle_change_auto_planting_category(chat_id)  # Handle change auto planting
+        elif callback_data == 'plot_upgrade':
+            await handle_plot_upgrade(chat_id)  # Handle plot upgrade
+        elif callback_data == 'manager_upgrade':
+            await handle_manager_upgrade(chat_id)  # Handle manager upgrade
+        elif callback_data.startswith('confirm_upgrade_'):
+            upgrade_id = int(callback_data.split('_')[2])  # Extract the upgrade ID
+            await handle_upgrade_confirmation(chat_id, upgrade_id)
+        elif callback_data.startswith('plant_'):
+            # Attempt to unpack the callback data
+            parts = callback_data.split('_')
+            if len(parts) == 4:
+                _, category, plant_id, price = parts
+                plant_id = int(plant_id)  # Ensure plant_id is an integer
+                price = int(price)
+                await handle_plant_selection(chat_id, plant_id, price)
+            else:
+                logger.error(f"Unexpected callback data format: {callback_data}")
+                await bot.send_message(chat_id=chat_id, text='There was an error processing your request. Please try again.')
+        elif callback_data.startswith('auto_plant_'):
+            await handle_auto_planting_plant_selection(chat_id, callback_data)
+        elif callback_data.startswith('max_'):
+            # Handle the max planting callback
+            parts = callback_data.split('_')
+            if len(parts) == 3:
+                _, plant_id, price = parts
+                plant_id = int(plant_id)  # Ensure plant_id is an integer
+                price = int(price)
+
+                # Calculate the maximum quantity based on the user's balance
+                conn = create_connection()
+                cursor = conn.cursor()
+
+                # Fetch user ID based on chat_id
+                cursor.execute("SELECT id FROM users WHERE chat_id = ?", (chat_id,))
+                user = cursor.fetchone()
+                user_id = user[0] if user else None
+
+                # Fetch cashflow entries for the user
+                cursor.execute("SELECT amount FROM cashflow_ledger WHERE user_id = ?", (user_id,))
+                balance_response = cursor.fetchall()
+
+                # Calculate total balance
+                total_balance = sum(entry[0] for entry in balance_response) if balance_response else 0
+
+                # Calculate max quantity
+                max_quantity = total_balance // price if price > 0 else 0
+
+                # Fetch the user's current upgrade level
+                cursor.execute("SELECT upgrade_id FROM user_upgrades WHERE user_id = ?", (user_id,))
+                user_upgrades = cursor.fetchall()  # Fetch all upgrades
+
+                # Determine the highest upgrade level
+                current_upgrade_level = 0  # Default to 0 if no upgrades
+                if user_upgrades:
+                    # Extract upgrade IDs
+                    upgrade_ids = [upgrade[0] for upgrade in user_upgrades]
+
+                    # Fetch levels for all upgrade IDs, filtering by category 'plot'
+                    cursor.execute("SELECT level FROM upgrade_listings WHERE id IN ({}) AND category = ?".format(','.join('?' * len(upgrade_ids))), upgrade_ids + ['plot'])
+                    levels = cursor.fetchall()
+
+                    # Find the maximum level
+                    current_upgrade_level = max(level[0] for level in levels) if levels else 0
+
+                # Get available slots based on the current upgrade level
+                available_slots = get_available_plots_slots(current_upgrade_level)
+
+                # Fetch crops for the user from the user_crops table
+                cursor.execute("SELECT SUM(planted_quantity) FROM user_crops WHERE user_id = ? AND (status = 'planted' OR status = 'Ready for Harvest')", (user_id,))
+                occupied_slots = cursor.fetchone()[0] or 0  # Default to 0 if no crops planted
+
+                # Ensure max quantity does not exceed available slots   
+                max_quantity = min(max_quantity, available_slots - occupied_slots)
+
+                if max_quantity > 0:
+                    # Proceed to plant the maximum quantity
+                    selected_plant = user_data[chat_id]['selected_plant']  # Ensure you have the selected plant data
+                    total_cost = max_quantity * selected_plant['price']  # Calculate total cost for max quantity
+
+                    # Check if the user can afford this total cost
+                    if total_balance >= total_cost:
+                        # Deduct cashflow
+                        transaction_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # Format as 'YYYY-MM-DD HH:MM:SS'
+                            
+                        # Fetch the plant details for the description
+                        plant = next((plant for category in plant_data.values() for plant in category if plant['id'] == selected_plant['plant_id']), None)
+                            
+                        if plant:
+                            description = f'Planted {max_quantity} {plant["emoji"]} {plant["name"]}(s).'  # Use plant name and emoji
+                        else:
+                            description = f'Planted {max_quantity} plants with ID {selected_plant["plant_id"]}.'  # Fallback description
+
+                        cursor.execute("INSERT INTO cashflow_ledger (user_id, amount, description, transaction_date) VALUES (?, ?, ?, ?)", 
+                                       (user_id, -total_cost, description, transaction_date))
+
+                        # Insert into user_crops
+                        cursor.execute("INSERT INTO user_crops (user_id, item_id, planted_at, status, planted_quantity) VALUES (?, ?, ?, ?, ?)",
+                                       (user_id, selected_plant['plant_id'], transaction_date, 'planted', max_quantity))
+
+                        # Commit the transaction
+                        conn.commit()  # Ensure changes are saved to the database
+
+                        await bot.send_message(chat_id=chat_id, text=f'You have successfully planted {max_quantity:,} {plant["name"]}(s)!')
+
+                        # Send a small-sized picture to the user
+                        photo_path = 'images/planted.webp'  # Replace with the path to your image file
+                        await bot.send_photo(chat_id=chat_id, photo=open(photo_path, 'rb'), caption='Happy planting! 🌱')  # Optional caption
+                    else:
+                        await bot.send_message(chat_id=chat_id, text='You do not have enough balance to plant this quantity.')
+                else:
+                    logger.error(f"Unexpected max callback data format: {callback_data}")
+                    await bot.send_message(chat_id=chat_id, text='There was an error processing your request. Please try again.')
+
+async def process_queue():
+    while True:
+        chat_id, text_or_callback_data, update = await message_queue.get()
+        if text_or_callback_data is not None:  # Message
+            await handle_message(chat_id, text_or_callback_data, update, None)
+        else:  # Callback query
+            await handle_message(chat_id, None, update, text_or_callback_data)
+        message_queue.task_done()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global ngrok_process  # Declare the global variable
+
+    # Startup logic
+    create_tables()  # Create necessary tables
+    ngrok_process = start_ngrok()  # Start ngrok and store the process
+    ngrok_url = get_ngrok_url()  # Get ngrok URL
+    set_telegram_webhook(ngrok_url)  # Set the Telegram webhook
+    
+    # Fetch plant data on startup
+    await fetch_plant_data()  # Load plant data into memory
+
+    logger.info("Startup logic completed.")
+
+    # Start the check_ready_for_harvest task in the background
+    asyncio.create_task(check_ready_for_harvest())  # Run the background task
+
+    # Start the queue processing in the background
+    asyncio.create_task(process_queue())
+
+    yield  # This will pause the lifespan context until the app is shut down
+
+    # Shutdown logic
+    logger.info("Shutting down the application...")
+    if ngrok_process:
+        ngrok_process.terminate()  # Terminate the ngrok process
+
+# Assign the lifespan context to the app
+app = FastAPI(lifespan=lifespan)
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    update = await request.json()
+    logger.info(f"Received update: {update}")
+
+    # Check if the update contains a message
+    if 'message' in update:
+        chat_id = update['message']['chat']['id']
+        text = update['message'].get('text', '')  # Use .get() to avoid KeyError
+
+        logger.info(f"Received message: {text} from chat_id: {chat_id}")
+
+        # Rate limiting check
+        if not rate_limiter(chat_id):
+            await bot.send_message(chat_id=chat_id, text='You are sending requests too quickly. Please wait a moment.')
+            return JSONResponse(content={"status": "ok"})  # Early return
+
+        logger.info(f"Received message: {text} from chat_id: {chat_id}") 
+
+        # Add the message to the queue instead of processing it directly
+        await handle_message(chat_id, text, update, None)  # For messages
+
     elif 'callback_query' in update:
         callback_query = update['callback_query']
         chat_id = callback_query['message']['chat']['id']
@@ -1567,158 +1787,13 @@ async def webhook(request: Request):
 
         logger.info(f"Received callback query: {callback_data} from chat_id: {chat_id}")
 
-        try:
-            if callback_data == 'planting':
-                await show_planting_menu(chat_id)
-            elif callback_data in ['Fruits', 'Vegetables', 'Grain']:
-                await show_plants(chat_id, callback_data)
-            elif callback_data.startswith('auto_planting_'):
-                category = callback_data.split('_')[2]  # Extract the category from the callback data
-                await show_auto_planting_plants(chat_id, category)
-            elif callback_data == 'show_game_menu':
-                await show_game_menu(chat_id)  # Show the game menu
-            elif callback_data == 'plant_status':  # Handle the plant status callback
-                await check_planting_status(chat_id)  # Check planting status
-            elif callback_data == 'admin_announcement':
-                await select_admin_announcement_type(chat_id)
-            elif callback_data == 'admin_announcement_text':
-                await admin_announcement_text(chat_id)
-            elif callback_data == 'admin_announcement_photo':
-                await admin_announcement_photo(chat_id)
-            elif callback_data == 'manager':
-                await show_manager_menu(chat_id)
-            elif callback_data == 'harvest':  # Handle the harvest callback
-                await harvest_crops(chat_id)  # Call the harvest function
-            elif callback_data == 'upgrades':
-                await show_upgrades_menu(chat_id)  # Show upgrades menu
-            elif callback_data == 'manager_on_off':
-                await handle_manager_on_off(chat_id)  # Handle manager on/off
-            elif callback_data == 'manager_on':
-                await handle_manager_on(chat_id)  # Handle manager on
-            elif callback_data == 'manager_off':
-                await handle_manager_off(chat_id)  # Handle manager off
-            elif callback_data == 'auto_planting':
-                await handle_auto_planting(chat_id)  # Handle auto planting
-            elif callback_data == 'change_auto_planting':
-                await handle_change_auto_planting_category(chat_id)  # Handle change auto planting
-            elif callback_data == 'plot_upgrade':
-                await handle_plot_upgrade(chat_id)  # Handle plot upgrade
-            elif callback_data == 'manager_upgrade':
-                await handle_manager_upgrade(chat_id)  # Handle manager upgrade
-            elif callback_data.startswith('confirm_upgrade_'):
-                upgrade_id = int(callback_data.split('_')[2])  # Extract the upgrade ID
-                await handle_upgrade_confirmation(chat_id, upgrade_id)
-            elif callback_data.startswith('plant_'):
-                # Attempt to unpack the callback data
-                parts = callback_data.split('_')
-                if len(parts) == 4:
-                    _, category, plant_id, price = parts
-                    plant_id = int(plant_id)  # Ensure plant_id is an integer
-                    price = int(price)
-                    await handle_plant_selection(chat_id, plant_id, price)
-                else:
-                    logger.error(f"Unexpected callback data format: {callback_data}")
-                    await bot.send_message(chat_id=chat_id, text='There was an error processing your request. Please try again.')
-            elif callback_data.startswith('auto_plant_'):
-                await handle_auto_planting_plant_selection(chat_id, callback_data)
-            elif callback_data.startswith('max_'):
-                # Handle the max planting callback
-                parts = callback_data.split('_')
-                if len(parts) == 3:
-                    _, plant_id, price = parts
-                    plant_id = int(plant_id)  # Ensure plant_id is an integer
-                    price = int(price)
+        # Rate limiting check
+        if not rate_limiter(chat_id):
+            await bot.send_message(chat_id=chat_id, text='You are sending requests too quickly. Please wait a moment.')
+            return JSONResponse(content={"status": "ok"})  # Early return
 
-                    # Calculate the maximum quantity based on the user's balance
-                    conn = create_connection()
-                    cursor = conn.cursor()
-
-                    # Fetch user ID based on chat_id
-                    cursor.execute("SELECT id FROM users WHERE chat_id = ?", (chat_id,))
-                    user = cursor.fetchone()
-                    user_id = user[0] if user else None
-
-                    # Fetch cashflow entries for the user
-                    cursor.execute("SELECT amount FROM cashflow_ledger WHERE user_id = ?", (user_id,))
-                    balance_response = cursor.fetchall()
-
-                    # Calculate total balance
-                    total_balance = sum(entry[0] for entry in balance_response) if balance_response else 0
-
-                    # Calculate max quantity
-                    max_quantity = total_balance // price if price > 0 else 0
-
-                    # Fetch the user's current upgrade level
-                    cursor.execute("SELECT upgrade_id FROM user_upgrades WHERE user_id = ?", (user_id,))
-                    user_upgrades = cursor.fetchall()  # Fetch all upgrades
-
-                    # Determine the highest upgrade level
-                    current_upgrade_level = 0  # Default to 0 if no upgrades
-                    if user_upgrades:
-                        # Extract upgrade IDs
-                        upgrade_ids = [upgrade[0] for upgrade in user_upgrades]
-
-                        # Fetch levels for all upgrade IDs, filtering by category 'plot'
-                        cursor.execute("SELECT level FROM upgrade_listings WHERE id IN ({}) AND category = ?".format(','.join('?' * len(upgrade_ids))), upgrade_ids + ['plot'])
-                        levels = cursor.fetchall()
-
-                        # Find the maximum level
-                        current_upgrade_level = max(level[0] for level in levels) if levels else 0
-
-                    # Get available slots based on the current upgrade level
-                    available_slots = get_available_plots_slots(current_upgrade_level)
-
-                    # Fetch crops for the user from the user_crops table
-                    cursor.execute("SELECT SUM(planted_quantity) FROM user_crops WHERE user_id = ? AND (status = 'planted' OR status = 'Ready for Harvest')", (user_id,))
-                    occupied_slots = cursor.fetchone()[0] or 0  # Default to 0 if no crops planted
-
-                    # Ensure max quantity does not exceed available slots   
-                    max_quantity = min(max_quantity, available_slots - occupied_slots)
-
-                    if max_quantity > 0:
-                        # Proceed to plant the maximum quantity
-                        selected_plant = user_data[chat_id]['selected_plant']  # Ensure you have the selected plant data
-                        total_cost = max_quantity * selected_plant['price']  # Calculate total cost for max quantity
-
-                        # Check if the user can afford this total cost
-                        if total_balance >= total_cost:
-                            # Deduct cashflow
-                            transaction_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')  # Format as 'YYYY-MM-DD HH:MM:SS'
-                            
-                            # Fetch the plant details for the description
-                            plant = next((plant for category in plant_data.values() for plant in category if plant['id'] == selected_plant['plant_id']), None)
-                            
-                            if plant:
-                                description = f'Planted {max_quantity} {plant["emoji"]} {plant["name"]}(s).'  # Use plant name and emoji
-                            else:
-                                description = f'Planted {max_quantity} plants with ID {selected_plant["plant_id"]}.'  # Fallback description
-
-                            cursor.execute("INSERT INTO cashflow_ledger (user_id, amount, description, transaction_date) VALUES (?, ?, ?, ?)", 
-                                           (user_id, -total_cost, description, transaction_date))
-
-                            # Insert into user_crops
-                            cursor.execute("INSERT INTO user_crops (user_id, item_id, planted_at, status, planted_quantity) VALUES (?, ?, ?, ?, ?)",
-                                           (user_id, selected_plant['plant_id'], transaction_date, 'planted', max_quantity))
-
-                            # Commit the transaction
-                            conn.commit()  # Ensure changes are saved to the database
-
-                            await bot.send_message(chat_id=chat_id, text=f'You have successfully planted {max_quantity:,} {plant["name"]}(s)!')
-
-                            # Send a small-sized picture to the user
-                            photo_path = 'images/planted.webp'  # Replace with the path to your image file
-                            await bot.send_photo(chat_id=chat_id, photo=open(photo_path, 'rb'), caption='Happy planting! 🌱')  # Optional caption
-                        else:
-                            await bot.send_message(chat_id=chat_id, text='You do not have enough balance to plant this quantity.')
-                    else:
-                        await bot.send_message(chat_id=chat_id, text='You do not have enough balance to plant any quantity.')
-                else:
-                    logger.error(f"Unexpected max callback data format: {callback_data}")
-                    await bot.send_message(chat_id=chat_id, text='There was an error processing your request. Please try again.')
-
-        except Exception as e:
-            logger.error(f"Error processing callback query: {e}")  # Log the actual exception
-            await bot.send_message(chat_id=chat_id, text=f'An error occurred while processing your request: {str(e)}')  # Send error message to user
+        # Add the callback query to the queue
+        await handle_message(chat_id, None, update, callback_data)  # For callback queries
 
     return JSONResponse(content={"status": "ok"})
 
