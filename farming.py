@@ -162,7 +162,9 @@ def create_tables():
         max_harvesting_ratio REAL,
         seed_purchase_price INTEGER,
         harvest_time INTEGER,
-        selling_price INTEGER
+        selling_price INTEGER,
+        upgrade_id INTEGER,
+        FOREIGN KEY (upgrade_id) REFERENCES upgrade_listings (id)
     )
     ''')
     
@@ -255,7 +257,8 @@ async def fetch_plant_data():
                 'min_harvesting_ratio': plant[4],  # Min harvesting ratio
                 'max_harvesting_ratio': plant[5],  # Max harvesting ratio
                 'harvest_time': plant[7],  # Harvest time
-                'selling_price': plant[8]  # Selling price
+                'selling_price': plant[8],  # Selling price
+                'upgrade_id': plant[9]  # Upgrade ID
             }
             plant_data[category].append(plant_info)
 
@@ -331,6 +334,7 @@ async def show_game_menu(chat_id):
             [telegram.InlineKeyboardButton("🌾 Plant Status", callback_data='plant_status')],
             [telegram.InlineKeyboardButton("🪴 Planting", callback_data='planting')],
             [telegram.InlineKeyboardButton("👨‍🌾 Harvest", callback_data='harvest')],
+            [telegram.InlineKeyboardButton("🏆 Rankings", callback_data='rankings')],
             [telegram.InlineKeyboardButton("🚧 Upgrades", callback_data='upgrades')]
         ]
     
@@ -341,6 +345,7 @@ async def show_game_menu(chat_id):
             [telegram.InlineKeyboardButton("🪴 Planting", callback_data='planting')],
             [telegram.InlineKeyboardButton("👨‍🌾 Harvest", callback_data='harvest')],
             [telegram.InlineKeyboardButton("🧑‍💼 Manager", callback_data='manager')],
+            [telegram.InlineKeyboardButton("🏆 Rankings", callback_data='rankings')],
             [telegram.InlineKeyboardButton("🚧 Upgrades", callback_data='upgrades')]
         ]
     
@@ -349,6 +354,7 @@ async def show_game_menu(chat_id):
         keyboard = [
             [telegram.InlineKeyboardButton("🌾 Plant Status", callback_data='plant_status')],
             [telegram.InlineKeyboardButton("🧑‍💼 Manager", callback_data='manager')],
+            [telegram.InlineKeyboardButton("🏆 Rankings", callback_data='rankings')],
             [telegram.InlineKeyboardButton("🚧 Upgrades", callback_data='upgrades')]
         ]
 
@@ -362,7 +368,8 @@ async def show_upgrades_menu(chat_id):
     """Display the upgrades menu with options for plot upgrades."""
     keyboard = [
         [telegram.InlineKeyboardButton("🌱 Plot", callback_data='plot_upgrade')],
-        [telegram.InlineKeyboardButton("👨‍🌾 Manager", callback_data='manager_upgrade')]
+        [telegram.InlineKeyboardButton("👨‍🌾 Manager", callback_data='manager_upgrade')],
+        [telegram.InlineKeyboardButton("☘️ Crops", callback_data='crops_upgrade')]
     ]
     reply_markup = telegram.InlineKeyboardMarkup(keyboard)
 
@@ -385,12 +392,27 @@ async def show_plants(chat_id, category):
         await bot.send_message(chat_id=chat_id, text='No plants available in this category.')
         return
 
+    conn = create_connection()
+    cursor = conn.cursor()
+
+    # Fetch user ID based on chat_id
+    cursor.execute("SELECT id FROM users WHERE chat_id = ?", (chat_id,))
+    user = cursor.fetchone()
+    user_id = user[0] if user else None
+
+    # Fetch all upgrade IDs for the user
+    cursor.execute("SELECT upgrade_id FROM user_upgrades WHERE user_id = ?", (user_id,))
+    user_upgrades = cursor.fetchall()  # Fetch all upgrades
+
+    # Filter the plants in the category to only include the ones with NULL upgrade_id or the plants with upgrade_id that is in the user_upgrades
+    filtered_plants = [plant for plant in plant_data[category] if plant['upgrade_id'] is None or plant['upgrade_id'] in [upgrade_id[0] for upgrade_id in user_upgrades]]
+    
     keyboard = [
         [telegram.InlineKeyboardButton(
             f"{plant['emoji']} {plant['name']} - ⬇${plant['seed_purchase_price']}/⬆${plant['selling_price']} - {plant['harvest_time']} min",
             callback_data=f"plant_{category}_{plant['id']}_{plant['seed_purchase_price']}"
         )]
-        for plant in plant_data[category]
+        for plant in filtered_plants
     ]
     reply_markup = telegram.InlineKeyboardMarkup(keyboard)
 
@@ -404,6 +426,23 @@ async def show_manager_menu(chat_id):
     ]
     reply_markup = telegram.InlineKeyboardMarkup(keyboard)
     await bot.send_message(chat_id=chat_id, text='Choose an option:', reply_markup=reply_markup)
+
+async def show_rankings(chat_id):
+    """Display the rankings menu with options for plant selection."""
+    conn = create_connection()
+    cursor = conn.cursor()
+    
+    # Fetch top 10 the username and total amount from the cashflow_ledger table, grouped by user_id, and order by the total amount in descending order
+    cursor.execute("SELECT users.username, SUM(cashflow_ledger.amount) FROM cashflow_ledger LEFT JOIN users ON cashflow_ledger.user_id = users.id GROUP BY users.id ORDER BY SUM(cashflow_ledger.amount) DESC LIMIT 10")
+    rankings = cursor.fetchall()
+
+    rankings_message = "🏆 **Top 10 Rankings**:\n\n"  # Added header
+    for index, rank in enumerate(rankings, start=1):
+        username = rank[0][:15] + '...' if len(rank[0]) > 15 else rank[0]  # Truncate long usernames
+        rankings_message += f"{index}️⃣ {username} - ${rank[1]:,}\n"  # Added ordinal numbers
+
+    photo_path = 'images/rankings.jpeg'
+    await bot.send_photo(chat_id=chat_id, photo=photo_path, caption=rankings_message)
 
 async def handle_manager_on_off(chat_id):
     """Handle the manager on/off selection for the user."""
@@ -796,6 +835,48 @@ async def handle_manager_upgrade(chat_id):
 
     conn.close()
 
+async def handle_crops_upgrade(chat_id):
+    """Handle the crops upgrade selection for the user."""
+    conn = create_connection()
+    cursor = conn.cursor()
+
+    # Fetch user ID based on chat_id
+    cursor.execute("SELECT id FROM users WHERE chat_id = ?", (chat_id,))
+    user = cursor.fetchone()
+    user_id = user[0] if user else None
+
+    # Fetch upgrades that is in the crops category and merge with the plants_listing table
+    cursor.execute("SELECT upgrade_listings.id, upgrade_listings.description, upgrade_listings.price, plants_listing.name, plants_listing.category, plants_listing.emoji FROM upgrade_listings LEFT JOIN plants_listing ON upgrade_listings.id = plants_listing.upgrade_id WHERE upgrade_listings.category = 'crops'")
+    crops_upgrades = cursor.fetchall()
+
+    # Fetch all upgrade IDs for the user
+    cursor.execute("SELECT upgrade_id FROM user_upgrades WHERE user_id = ?", (user_id,))
+    user_upgrades = cursor.fetchall()  # Fetch all upgrades
+
+    # Filter the crops_upgrades to only include the ones that are in the user_upgrades
+    filtered_crops_upgrades = [upgrade for upgrade in crops_upgrades if upgrade[0] in [upgrade_id[0] for upgrade_id in user_upgrades]]
+
+    # Filter the crops_upgrades to only include the ones that are not in the user_upgrades
+    locked_crops_upgrades = [upgrade for upgrade in crops_upgrades if upgrade[0] not in [upgrade_id[0] for upgrade_id in user_upgrades]]
+
+    # Message to user
+    if filtered_crops_upgrades:
+        if locked_crops_upgrades:
+            upgrades_message = 'You have the following crops upgrades unlocked:\n' + '\n'.join([f'{upgrade[5]} {upgrade[3]}' for upgrade in filtered_crops_upgrades]) + '\n\n' + 'Please select the crops upgrade you want to purchase:'
+        else:
+            upgrades_message = 'You have the following crops upgrades:\n' + '\n'.join([f'{upgrade[5]} {upgrade[3]}' for upgrade in filtered_crops_upgrades]) + '\n\n' + 'You have no crops upgrades to be unlocked.'
+    else:
+        upgrades_message = 'You have no crops upgrades unlocked.\n\n' + 'Please select the crops upgrade you want to purchase:'
+
+    # Please select the crops upgrade you want to purchase
+    keyboard = [
+        [telegram.InlineKeyboardButton(f'{upgrade[5]} {upgrade[3]} ${upgrade[2]:,} - {upgrade[1]}', callback_data=f'confirm_upgrade_{upgrade[0]}')] for upgrade in locked_crops_upgrades
+    ]
+    reply_markup = telegram.InlineKeyboardMarkup(keyboard)
+    await bot.send_message(chat_id=chat_id, text=upgrades_message, reply_markup=reply_markup)
+
+    conn.close()
+
 # Handle the confirmation of the upgrade
 async def handle_upgrade_confirmation(chat_id, upgrade_id):
     """Handle the confirmation of the plot upgrade."""
@@ -838,6 +919,8 @@ async def handle_upgrade_confirmation(chat_id, upgrade_id):
                 photo_path = 'images/plot_upgrade.webp'  # Replace with the path to your image file
             elif category == 'manager':
                 photo_path = 'images/manager_upgrade.webp'  # Replace with the path to your image file
+            elif category == 'crops':
+                photo_path = 'images/crops_upgrade.jpg'  # Replace with the path to your image file
             await bot.send_photo(chat_id=chat_id, photo=open(photo_path, 'rb'), caption='Upgrade successful! 🎉')  # Optional caption
 
         else:
@@ -1158,7 +1241,7 @@ async def check_ready_for_harvest():
         # Notify users
         for chat_id in users_to_notify:
             try:
-                photo_path = 'images/ready_for_harvest.webp'  # Replace with the path to your image file
+                photo_path = 'images/ready_for_harvest.jpg'  # Replace with the path to your image file
                 await bot.send_photo(chat_id=chat_id, photo=open(photo_path, 'rb'), caption='Your crops are ready for harvest! 🌾')     
             except telegram.error.BadRequest as e:
                 logger.error(f"Failed to send message to chat_id {chat_id}: {e}")  # Log the error
@@ -1368,12 +1451,27 @@ async def show_auto_planting_plants(chat_id, category):
         await bot.send_message(chat_id=chat_id, text='No plants available in this category.')
         return
 
+    conn = create_connection()
+    cursor = conn.cursor()
+
+    # Fetch user ID based on chat_id
+    cursor.execute("SELECT id FROM users WHERE chat_id = ?", (chat_id,))
+    user = cursor.fetchone()
+    user_id = user[0] if user else None
+
+    # Fetch all upgrade IDs for the user
+    cursor.execute("SELECT upgrade_id FROM user_upgrades WHERE user_id = ?", (user_id,))
+    user_upgrades = cursor.fetchall()  # Fetch all upgrades
+
+    # Filter the plants in the category to only include the ones with NULL upgrade_id or the plants with upgrade_id that is in the user_upgrades
+    filtered_plants = [plant for plant in plant_data[category] if plant['upgrade_id'] is None or plant['upgrade_id'] in [upgrade_id[0] for upgrade_id in user_upgrades]]
+    
     keyboard = [
         [telegram.InlineKeyboardButton(
             f"{plant['emoji']} {plant['name']} - ⬇${plant['seed_purchase_price']}/⬆${plant['selling_price']} - {plant['harvest_time']} min",
             callback_data=f"auto_plant_{plant['id']}"
         )]
-        for plant in plant_data[category]
+        for plant in filtered_plants
     ]
     reply_markup = telegram.InlineKeyboardMarkup(keyboard)
 
@@ -1458,6 +1556,9 @@ async def handle_message(chat_id, text, update, callback_data):
         elif text == '/admin':
             await show_admin_menu(chat_id)
 
+        elif text == '/rankings':
+            await show_rankings(chat_id)
+
         # Handle quantity input after plant selection
         elif 'selected_plant' in user_data[chat_id] and callback_data is None:
             # Rate limiting check
@@ -1467,6 +1568,13 @@ async def handle_message(chat_id, text, update, callback_data):
 
             try:
                 selected_plant = user_data[chat_id]['selected_plant']
+
+                quantity = 0  # Default value
+
+                # Check if the text is a valid quantity
+                if text.isdigit():
+                    quantity = int(text)
+                
                 total_cost = quantity * selected_plant['price']
 
                 conn = create_connection()  # Create a connection to the SQLite database
@@ -1576,6 +1684,8 @@ async def handle_message(chat_id, text, update, callback_data):
                 await show_auto_planting_plants(chat_id, category)
             elif callback_data == 'show_game_menu':
                 await show_game_menu(chat_id)  # Show the game menu
+            elif callback_data == 'rankings':
+                await show_rankings(chat_id)
             elif callback_data == 'plant_status':  # Handle the plant status callback
                 await check_planting_status(chat_id)  # Check planting status
             elif callback_data == 'admin_announcement':
@@ -1604,6 +1714,8 @@ async def handle_message(chat_id, text, update, callback_data):
                 await handle_plot_upgrade(chat_id)  # Handle plot upgrade
             elif callback_data == 'manager_upgrade':
                 await handle_manager_upgrade(chat_id)  # Handle manager upgrade
+            elif callback_data == 'crops_upgrade':
+                await handle_crops_upgrade(chat_id)  # Handle crops upgrade
             elif callback_data.startswith('confirm_upgrade_'):
                 upgrade_id = int(callback_data.split('_')[2])  # Extract the upgrade ID
                 await handle_upgrade_confirmation(chat_id, upgrade_id)
