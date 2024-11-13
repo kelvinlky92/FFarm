@@ -5,15 +5,23 @@ The Farming Bot Application is a Telegram bot designed to help users manage thei
 
 ## Features
 - **Planting Crops**: Users can choose from various crops to plant in their virtual farm.
-- **Harvesting**: Users can harvest their crops once they are ready.
+- **Harvesting**: Users can harvest their crops once they are ready, with a new harvest factor event logic that introduces variability in the harvest outcome:
+  - **Extreme Disaster**: 1% chance to destroy all crops.
+  - **Mild Disaster**: 4% chance to destroy half of the crops.
+  - **Minimum Harvest**: 15% chance for a minimum harvest rate.
+  - **Normal Season**: 60% chance for an average harvest rate.
+  - **Good Season**: 20% chance for a maximum harvest rate.
 - **Manager Upgrades**: Users can upgrade their farming manager to improve efficiency.
 - **Auto Planting**: Users can set up auto planting for their crops.
 - **User Notifications**: The bot sends notifications to users when their crops are ready for harvest.
 - **Rankings**: Users can now view the **Top 10 Rankings** to see how they compare with other players based on their total earnings! 🏆
 
 ## Updates
+📢 **New Harvest Factor Logic!** 🌱  
+We are excited to announce the addition of a new harvesting logic that introduces variability in the harvest outcomes based on random events. Players will now experience different harvest results, making the game more dynamic and engaging.
+
 📢 **New Ranking Feature!** 🌟  
-We are excited to announce the addition of a ranking feature! Players can now check the **Top 10 Rankings** to see the usernames and total amounts earned by our top players. Compete and climb the leaderboard!
+We are also thrilled to announce the addition of a ranking feature! Players can now check the **Top 10 Rankings** to see the usernames and total amounts earned by our top players. Compete and climb the leaderboard!
 
 ## Requirements
 - Python 3.x
