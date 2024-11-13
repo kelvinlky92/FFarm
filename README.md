@@ -9,6 +9,11 @@ The Farming Bot Application is a Telegram bot designed to help users manage thei
 - **Manager Upgrades**: Users can upgrade their farming manager to improve efficiency.
 - **Auto Planting**: Users can set up auto planting for their crops.
 - **User Notifications**: The bot sends notifications to users when their crops are ready for harvest.
+- **Rankings**: Users can now view the **Top 10 Rankings** to see how they compare with other players based on their total earnings! 🏆
+
+## Updates
+📢 **New Ranking Feature!** 🌟  
+We are excited to announce the addition of a ranking feature! Players can now check the **Top 10 Rankings** to see the usernames and total amounts earned by our top players. Compete and climb the leaderboard!
 
 ## Requirements
 - Python 3.x
